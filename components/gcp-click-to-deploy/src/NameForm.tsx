@@ -1,7 +1,7 @@
 import * as jsYaml from 'js-yaml';
 import * as React from 'react';
-
-const gapi: any = null;
+import Gapi from './Gapi';
+import { flattenDeploymentOperationError } from './Utils';
 
 interface NameFormProps {
   getDeploymentTemplates: () => { clusterJinja: string, clusterSpec: any };
@@ -18,8 +18,9 @@ interface NameFormState {
 }
 
 export default class NameForm extends React.Component<NameFormProps & React.HTMLAttributes<HTMLFormElement>, NameFormState> {
-  public handleChange: any;
-  public handleSubmit: any;
+  private _boundHandleChange: (ev: React.FormEvent) => void;
+  private _boundHandleSubmit: (ev: React.FormEvent) => void;
+  private _boundCreateDeployment: () => void;
 
   constructor(props: NameFormProps) {
     super(props);
@@ -32,12 +33,64 @@ export default class NameForm extends React.Component<NameFormProps & React.HTML
       zone: 'us-east1-d',
     };
 
-    this.handleChange = this._handleChange.bind(this);
-    this.handleSubmit = this._handleSubmit.bind(this);
+    this._boundHandleChange = this._handleChange.bind(this);
+    this._boundHandleSubmit = this._handleSubmit.bind(this);
+    this._boundCreateDeployment = this._createDeployment.bind(this);
+  }
+
+  public render() {
+    return (
+      <div>
+        <form onSubmit={this._boundHandleSubmit}>
+          <div>
+            <label>
+              Project:
+              <input type='text' name='project' value={this.state.project} onChange={this._boundHandleChange} />
+            </label>
+          </div>
+          <div>
+            <label>
+              Deployment name:
+              <input type='text' name='deploymentName' value={this.state.deploymentName} onChange={this._boundHandleChange} />
+            </label>
+          </div>
+          <div>
+            <label>
+              Zone
+              <input type='text' name='zone' value={this.state.zone} onChange={this._boundHandleChange} />
+            </label>
+          </div>
+          <div>
+            <label>
+              IP name:
+              <input type='text' name='ipName' value={this.state.ipName} onChange={this._boundHandleChange} />
+            </label>
+          </div>
+          <div>
+            <label>
+              hostname:
+              <input type='text' name='hostName' value={this.state.hostName} onChange={this._boundHandleChange} />
+            </label>
+          </div>
+          <div>
+            <label>
+              Email for Lets Encrypt:
+              <input type='text' name='email' value={this.state.email} onChange={this._boundHandleChange} />
+            </label>
+          </div>
+        </form>
+        <div>
+          {/* TODO: REVISIT */}
+          <button className='createDeployment' onClick={this._boundCreateDeployment}>
+            Create Deployment
+      </button>
+        </div>
+      </div>
+    );
   }
 
   // Create a  Kubeflow deployment.
-  public createDeployment() {
+  private _createDeployment() {
     const templates = this.props.getDeploymentTemplates();
     if (this.state.project === '') {
       alert('You must set project');
@@ -95,10 +148,14 @@ export default class NameForm extends React.Component<NameFormProps & React.HTML
 
     templates.clusterSpec.resources[0] = kubeflow;
     const yamlClusterSpec = jsYaml.dump(templates.clusterSpec);
+    this.props.appendLine('\n----------------\nNew deployment:');
     this.props.appendLine('Spec:\n' + jsYaml.dump(yamlClusterSpec));
 
+    const project = this.state.project;
+    const deploymentName = this.state.deploymentName;
+
     const resource = {
-      'name': this.state.deploymentName,
+      'name': deploymentName,
       'target': {
         'config': {
           'content': yamlClusterSpec,
@@ -112,67 +169,32 @@ export default class NameForm extends React.Component<NameFormProps & React.HTML
       },
     };
 
-    gapi.client.deploymentmanager.deployments.insert({
-      project: this.state.project,
-      resource,
-    }).then((res: any) => {
-      this.props.appendLine('Result of insert:\n' + res);
-    }, (err: any) => {
-      this.props.appendLine('Error doing insert:\n' + err);
-      alert('Error doing insert: ' + err)
-    });
+    Gapi.deploymentmanager.insert(project, resource)
+      .then(res => {
+        this.props.appendLine('Result of insert:\n' + JSON.stringify(res));
+        this._monitorDeployment(project, deploymentName)
+      })
+      .catch(err => {
+        this.props.appendLine('Error doing insert:\n' + err);
+        alert('Error doing insert: ' + err)
+      });
 
   } // insertDeployment
 
-  public render() {
-    return (
-      <div>
-        <form onSubmit={this.handleSubmit}>
-          <div>
-            <label>
-              Project:
-              <input type='text' name='project' value={this.state.project} onChange={this.handleChange} />
-            </label>
-          </div>
-          <div>
-            <label>
-              Deployment name:
-              <input type='text' name='deploymentName' value={this.state.deploymentName} onChange={this.handleChange} />
-            </label>
-          </div>
-          <div>
-            <label>
-              Zone
-              <input type='text' name='zone' value={this.state.zone} onChange={this.handleChange} />
-            </label>
-          </div>
-          <div>
-            <label>
-              IP name:
-              <input type='text' name='ipName' value={this.state.ipName} onChange={this.handleChange} />
-            </label>
-          </div>
-          <div>
-            <label>
-              hostname:
-              <input type='text' name='hostname' value={this.state.hostName} onChange={this.handleChange} />
-            </label>
-          </div>
-          <div>
-            <label>
-              Email for Lets Encrypt:
-              <input type='text' name='email' value={this.state.email} onChange={this.handleChange} />
-            </label>
-          </div>
-        </form>
-        <div>
-          {/* TODO: REVISIT */}
-          <button className='createDeployment' onClick={this.createDeployment}>
-            Create Deployment
-      </button>
-        </div>
-      </div>
-    );
+  private _monitorDeployment(project: string, deploymentName: string) {
+    const monitorInterval = setInterval(() => {
+      Gapi.deploymentmanager.get(this.state.project, deploymentName)
+        .then(r => {
+          if (r.operation!.error && r.operation!.error!.errors!.length) {
+            this.props.appendLine(
+                'deployment failed with error:' + flattenDeploymentOperationError(r.operation!));
+            clearInterval(monitorInterval);
+          } else {
+            this.props.appendLine(r.operation!.status!);
+          }
+        })
+        .catch(err => this.props.appendLine('deployment failed with error:' + err));
+    }, 3000);
   }
 
   private _handleChange(event: Event) {
